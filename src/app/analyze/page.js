@@ -12,40 +12,66 @@ const EXAMPLE_PROMPTS = [
 ];
 
 export default function AnalyzePage() {
+  const [inputType, setInputType] = useState("text"); // 'text' or 'pdf'
+  const [file, setFile] = useState(null);
   const [text, setText] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
   const [results, setResults] = useState(null);
+  const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
   
+  const fileInputRef = useRef(null);
   const resultsRef = useRef(null);
   const sectionsRef = useRef([]);
   const strategiesRef = useRef([]);
 
   const handleSubmit = async (e) => {
-    e.preventDefault();
-    if (!text.trim()) return;
+    if (e) e.preventDefault();
+    if (inputType === "text" && !text.trim()) return;
+    if (inputType === "pdf" && !file) return;
 
     setIsLoading(true);
     setResults(null);
     setError("");
 
     try {
-      const response = await fetch("/api/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text })
-      });
+      let response;
+      if (inputType === "text") {
+        response = await fetch("/api/analyze", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text })
+        });
+      } else {
+        const formData = new FormData();
+        formData.append("file", file);
+        response = await fetch("/api/analyze/pdf", {
+          method: "POST",
+          body: formData
+        });
+      }
 
       if (!response.ok) {
-        throw new Error("Failed to analyze text");
+        const errData = await response.json();
+        throw new Error(errData.error || "Failed to analyze input");
       }
 
       const data = await response.json();
       setResults(data);
     } catch (err) {
-      setError("An error occurred during analysis. Please try again.");
+      setError(err.message || "An error occurred during analysis. Please try again.");
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const handleFileChange = (e) => {
+    const selectedFile = e.target.files[0];
+    if (selectedFile && selectedFile.type === "application/pdf") {
+      setFile(selectedFile);
+      setError("");
+    } else {
+      setFile(null);
+      setError("Please select a valid PDF file.");
     }
   };
 
@@ -67,7 +93,9 @@ export default function AnalyzePage() {
         // Animate strategy bars
         if (strategiesRef.current.length > 0) {
           strategiesRef.current.forEach((el, index) => {
+            if (!el) return;
             const bar = el.querySelector("." + styles.barFill);
+            if (!bar) return;
             const score = results.strategies[index].score * 100;
             
             gsap.to(el, { opacity: 1, duration: 0.4, delay: index * 0.1 });
@@ -91,7 +119,7 @@ export default function AnalyzePage() {
         <header className={styles.header}>
           <h1 className="gold-gradient-text">Case Intelligence Engine</h1>
           <p className={styles.subtitle}>
-            Advanced semantic analysis across BNS, BNSS, and BSA frameworks. Designed for high-speed legal research and tactical defense planning.
+            Advanced semantic analysis across BNS, BNSS, and BSA frameworks. Support for direct text input and legal document (PDF) processing.
           </p>
           <div className={styles.disclaimerPill}>
             <span>⚖️</span> PROFESSIONAL LEGAL RESEARCH ASSISTANT
@@ -102,54 +130,148 @@ export default function AnalyzePage() {
         <div className={styles.analyzerLayout}>
           {/* Input Area */}
           <div className={styles.inputPanel}>
-            <form onSubmit={handleSubmit}>
-              <div className={styles.formGroup}>
-                <label htmlFor="caseDescription">Case Description</label>
-                <textarea
-                  id="caseDescription"
-                  className={styles.textarea}
-                  placeholder="Enter a short case summary or describe the event..."
-                  value={text}
-                  onChange={(e) => setText(e.target.value)}
-                  disabled={isLoading}
-                />
-              </div>
-              
+            <div className={styles.inputTabs}>
               <button 
-                type="submit" 
-                className={`primary-btn ${styles.submitBtn}`}
-                disabled={isLoading || !text.trim()}
+                className={inputType === 'text' ? styles.activeTab : ''} 
+                onClick={() => setInputType('text')}
               >
-                {isLoading ? (
-                  <><span className={styles.loader}></span> Analyzing Context...</>
-                ) : (
-                  "Run Analysis"
-                )}
+                Text Analysis
               </button>
-            </form>
-
-            <div className={styles.examplePrompts}>
-              <p>Try an example:</p>
-              <div className={styles.tagGroup}>
-                {EXAMPLE_PROMPTS.map((prompt, idx) => (
-                  <button 
-                    key={idx} 
-                    className={styles.tag}
-                    onClick={() => setText(prompt)}
-                  >
-                    "{prompt.substring(0, 30)}..."
-                  </button>
-                ))}
-              </div>
+              <button 
+                className={inputType === 'pdf' ? styles.activeTab : ''} 
+                onClick={() => setInputType('pdf')}
+              >
+                PDF Case File
+              </button>
             </div>
 
-            {error && <div style={{color: '#ef4444', marginTop: '16px'}}>{error}</div>}
+            {inputType === 'text' ? (
+              <form onSubmit={handleSubmit}>
+                <div className={styles.formGroup}>
+                  <label htmlFor="caseDescription">Case Description</label>
+                  <textarea
+                    id="caseDescription"
+                    className={styles.textarea}
+                    placeholder="Enter a short case summary or describe the event..."
+                    value={text}
+                    onChange={(e) => setText(e.target.value)}
+                    disabled={isLoading}
+                  />
+                </div>
+                
+                <button 
+                  type="submit" 
+                  className={`primary-btn ${styles.submitBtn}`}
+                  disabled={isLoading || !text.trim()}
+                >
+                  {isLoading ? (
+                    <><span className={styles.loader}></span> Analyzing Context...</>
+                  ) : (
+                    "Run Analysis"
+                  )}
+                </button>
+
+                <div className={styles.examplePrompts}>
+                  <p>Try an example:</p>
+                  <div className={styles.tagGroup}>
+                    {EXAMPLE_PROMPTS.map((prompt, idx) => (
+                      <button 
+                        key={idx} 
+                        className={styles.tag}
+                        onClick={() => setText(prompt)}
+                        type="button"
+                      >
+                        "{prompt.substring(0, 30)}..."
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </form>
+            ) : (
+              <div className={styles.pdfUploadArea}>
+                <div 
+                  className={`${styles.dropZone} ${file ? styles.hasFile : ''}`}
+                  onClick={() => fileInputRef.current.click()}
+                >
+                  <input 
+                    type="file" 
+                    ref={fileInputRef} 
+                    onChange={handleFileChange} 
+                    accept=".pdf" 
+                    style={{display: 'none'}} 
+                  />
+                  <span className={styles.uploadIcon}>📄</span>
+                  {file ? (
+                    <div className={styles.fileInfo}>
+                      <span className={styles.fileName}>{file.name}</span>
+                      <span className={styles.fileSize}>{(file.size / 1024 / 1024).toFixed(2)} MB</span>
+                    </div>
+                  ) : (
+                    <div className={styles.uploadPrompt}>
+                      <p>Click or drag case file here</p>
+                      <span>Supports PDF documents up to 10MB</span>
+                    </div>
+                  )}
+                </div>
+
+                <button 
+                  className={`primary-btn ${styles.submitBtn}`}
+                  onClick={handleSubmit}
+                  disabled={isLoading || !file}
+                  style={{marginTop: '24px'}}
+                >
+                  {isLoading ? (
+                    <><span className={styles.loader}></span> Extracting & Analyzing...</>
+                  ) : (
+                    "Upload and Analyze Case"
+                  )}
+                </button>
+              </div>
+            )}
+
+            {error && <div className={styles.errorMsg}>{error}</div>}
           </div>
+
 
           {/* Results Area */}
           <div ref={resultsRef} className={styles.resultsPanel}>
             {results && (
               <>
+                {results.pdfData && (
+                  <div className={styles.pdfSummary}>
+                    <div className={styles.summaryHeader}>
+                      <h3>Extracted Case Context</h3>
+                      <span className={styles.pageCountBadge}>{results.pdfData.pageCount} Pages</span>
+                    </div>
+                    <p className={styles.summaryText}>"{results.pdfData.summary}"</p>
+                    
+                    {results.pdfData.images && results.pdfData.images.length > 0 && (
+                      <div className={styles.imageGrid}>
+                        {results.pdfData.images.map((img, i) => (
+                          <div key={i} className={styles.imageItem}>
+                            <img 
+                              src={img.dataUrl} 
+                              alt={`Extracted from page ${img.page}`} 
+                              className={styles.extractedImage}
+                            />
+                            <span className={styles.imageLabel}>Page {img.page} ({img.width}x{img.height})</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {results.pdfData.imageCount > 0 && (!results.pdfData.images || results.pdfData.images.length === 0) && (
+                      <div className={styles.imageGrid}>
+                        {[...Array(results.pdfData.imageCount)].map((_, i) => (
+                          <div key={i} className={styles.imagePlaceholder}>
+                            <span>🖼️</span>
+                            Image {i + 1}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 <div>
                   <h2 className={styles.sectionHeader}>
                     <span>⚖️</span> Matched Legal Sections
