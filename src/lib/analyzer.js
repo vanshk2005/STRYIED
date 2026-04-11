@@ -1,105 +1,95 @@
 import fs from 'fs';
 import path from 'path';
 import { strategyMappings } from '@/data/strategyKeywords';
+import { pipeline } from '@xenova/transformers';
 
-// ─── helpers ────────────────────────────────────────────────────────────────
+// Cache for the embedding pipeline
+let extractor = null;
 
-function tokenize(text) {
-  return text
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .split(/\s+/)
-    .filter(Boolean);
-}
-
-/**
- * BM25-style bag-of-words similarity between a query token-set and a document string.
- * Returns a score in [0, 1].
- */
-function bagScore(queryTokens, docText) {
-  if (!docText) return 0;
-  const docTokens = tokenize(docText);
-  const docSet = new Map();
-  for (const t of docTokens) docSet.set(t, (docSet.get(t) || 0) + 1);
-
-  let hits = 0;
-  for (const t of queryTokens) {
-    if (docSet.has(t)) hits += Math.log(1 + docSet.get(t));
+async function getExtractor() {
+  if (!extractor) {
+    extractor = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
   }
-  // normalise against query length to keep scores comparable
-  return hits / (queryTokens.length + 1);
+  return extractor;
 }
 
-/**
- * Score a section entry against the user query.
- * Combines matches on title, description, and explicit keywords.
- */
-function scoreSectionEntry(entry, queryTokens) {
-  const titleScore      = bagScore(queryTokens, entry.title)       * 3;
-  const descScore       = bagScore(queryTokens, entry.description) * 2;
-  const keywordScore    = bagScore(queryTokens, (entry.keywords || []).join(' ')) * 2.5;
-  const sectionScore    = bagScore(queryTokens, entry.section)     * 1;
-
-  return titleScore + descScore + keywordScore + sectionScore;
+function cosineSimilarity(vecA, vecB) {
+  let dotProduct = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0; i < vecA.length; i++) {
+    dotProduct += vecA[i] * vecB[i];
+    normA += vecA[i] * vecA[i];
+    normB += vecB[i] * vecB[i];
+  }
+  return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
 }
-
-/**
- * Score a strategy against the user query using its keywords array.
- */
-function scoreStrategy(strategy, queryTokens) {
-  const keywordScore  = bagScore(queryTokens, strategy.keywords.join(' ')) * 3;
-  const descScore     = bagScore(queryTokens, strategy.description)       * 1.5;
-  const nameScore     = bagScore(queryTokens, strategy.strategy)           * 1;
-  return keywordScore + descScore + nameScore;
-}
-
-// ─── main export ────────────────────────────────────────────────────────────
 
 export async function performAnalysis(text) {
   if (!text || text.trim().length === 0) {
     throw new Error('Case text is required for analysis');
   }
 
-  const queryTokens = tokenize(text);
-
-  // ── 1. Section matching ──────────────────────────────────────────────────
+  // 1. Semantic Search for Sections using Embeddings
   const datasetPath = path.join(process.cwd(), 'src', 'data', 'bns_dataset.json');
+  const embeddingsPath = path.join(process.cwd(), 'src', 'data', 'bns_embeddings.json');
+  
   const sectionsData = JSON.parse(fs.readFileSync(datasetPath, 'utf8'));
-
-  const scoredSections = sectionsData.map(entry => ({
-    entry,
-    score: scoreSectionEntry(entry, queryTokens)
-  }));
-
-  const maxSectionScore = Math.max(...scoredSections.map(s => s.score), 1);
-
+  const embeddingsData = JSON.parse(fs.readFileSync(embeddingsPath, 'utf8'));
+  
+  const extractorInstance = await getExtractor();
+  const output = await extractorInstance(text, { pooling: 'mean', normalize: true });
+  const userEmbedding = Array.from(output.data);
+  
+  // Calculate similarities
+  const scoredSections = embeddingsData.map(item => {
+    const similarity = cosineSimilarity(userEmbedding, item.embedding);
+    return {
+      section: item.section,
+      score: similarity
+    };
+  });
+  
+  // Sort by score and take top 10
   const topMatches = scoredSections
-    .filter(s => s.score > 0)
     .sort((a, b) => b.score - a.score)
     .slice(0, 10)
-    .map(s => ({
-      ...s.entry,
-      confidence: Math.min(99, Math.round((s.score / maxSectionScore) * 95) + 4)
-    }));
-
-  // ── 2. Strategy matching ─────────────────────────────────────────────────
-  const scoredStrategies = strategyMappings.map(strategy => ({
-    strategy,
-    score: scoreStrategy(strategy, queryTokens)
-  }));
-
-  const maxStratScore = Math.max(...scoredStrategies.map(s => s.score), 1);
-
+    .filter(item => item.score > 0.3) // Filter out low quality matches
+    .map(match => {
+      const fullEntry = sectionsData.find(s => s.section === match.section);
+      return {
+        ...fullEntry,
+        confidence: Math.round(match.score * 100)
+      };
+    });
+  
+  // 2. Semantic Search for Legal Strategies
+  const strategyEmbeddingsPath = path.join(process.cwd(), 'src', 'data', 'strategy_embeddings.json');
+  const strategyEmbeddingsData = JSON.parse(fs.readFileSync(strategyEmbeddingsPath, 'utf8'));
+  
+  // Calculate similarities for strategies
+  const scoredStrategies = strategyEmbeddingsData.map(item => {
+    const similarity = cosineSimilarity(userEmbedding, item.embedding);
+    return {
+      label: item.label,
+      score: similarity
+    };
+  });
+  
+  // Sort and return top 3 professional strategies
   const topStrategies = scoredStrategies
     .sort((a, b) => b.score - a.score)
     .slice(0, 3)
-    .map(s => ({
-      label: s.strategy.strategy,
-      description: s.strategy.description,
-      // Normalise to a 0.40–0.96 range so the UI looks confident on real hits
-      score: Math.min(0.96, Math.max(0.40, (s.score / maxStratScore) * 0.92 + 0.04))
-    }));
-
+    .map(s => {
+      const fullStrategy = strategyMappings.find(sm => sm.strategy === s.label);
+      return {
+        ...s,
+        description: fullStrategy ? fullStrategy.description : '',
+        // Normalize score to look more 'confident' for relevant matches (0.4 to 0.95 range)
+        score: Math.max(0.1, Math.min(0.99, (s.score - 0.2) * 1.5))
+      };
+    });
+    
   return {
     sections: topMatches,
     strategies: topStrategies
